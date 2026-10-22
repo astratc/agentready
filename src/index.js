@@ -1,19 +1,21 @@
 // AgentReady: agent-readiness audit API. Paid via x402 (USDC on Base). Receives only; never signs or spends.
 import { Hono } from "hono";
-import { paymentMiddleware } from "x402-hono";
+import { requirements, paywall, httpFacilitator } from "./x402.js";
+import { favicon } from "./favicon.js";
 import { audit } from "./audit.js";
 import { landing } from "./landing.js";
 
 const app = new Hono();
 const BASE = "https://agentready.astratc.workers.dev";
-app.use("*", async (c, next) => { await next(); c.res.headers.set("access-control-allow-origin", "*"); c.res.headers.set("access-control-expose-headers", "PAYMENT-REQUIRED, X-PAYMENT-RESPONSE"); });
+app.use("*", async (c, next) => { await next(); c.res.headers.set("access-control-allow-origin", "*"); c.res.headers.set("access-control-expose-headers", "PAYMENT-REQUIRED, PAYMENT-RESPONSE, X-PAYMENT-RESPONSE"); });
 app.options("*", c => c.body(null, 204, { "access-control-allow-headers": "*", "access-control-allow-methods": "GET, OPTIONS" }));
 
 app.get("/", c => c.html(landing(c.env)));
+app.get("/favicon.ico", () => favicon());
 app.get("/api", c => c.json({ name: "AgentReady", description: "Agent-readiness audit for any website or API: x402, did.json, agent card, MCP, llms.txt, robots, OpenAPI, CORS.", payTo: c.env.PAY_TO, network: c.env.NETWORK,
   endpoints: { "GET /v1/check?url=": c.env.PRICE_CHECK + " quick score + fix list", "GET /v1/report?url=": c.env.PRICE_REPORT + " full report (JSON + markdown, probes, templates)", "GET /demo?url=": `free, ${c.env.DEMO_PER_DAY}/IP/day` },
   source: "https://github.com/astratc/agentready", contact: c.env.CONTACT }));
-app.get("/.well-known/x402", c => c.json({ version: 1, resources: [`${BASE}/v1/check`, `${BASE}/v1/report`], instructions: "GET ?url=<domain>. Pay via x402 v1 (exact, USDC on Base). Docs: " + BASE + "/llms.txt" }));
+app.get("/.well-known/x402", c => c.json({ version: 2, resources: [`${BASE}/v1/check`, `${BASE}/v1/report`], instructions: "GET ?url=<domain>. Pay via x402 v2 (exact, USDC on Base, PAYMENT-SIGNATURE header; v1 X-PAYMENT also accepted). Docs: " + BASE + "/llms.txt" }));
 app.get("/.well-known/did.json", c => c.json({ "@context": ["https://www.w3.org/ns/did/v1"], id: "did:web:agentready.astratc.workers.dev",
   service: [{ id: "#api", type: "x402API", serviceEndpoint: BASE + "/api" }] }));
 const card = c => ({ name: "AgentReady", description: "Audits a URL for AI-agent readiness and x402 payment support; returns a score and fix list.", url: BASE, version: "1.0.0", provider: { organization: "Astra Trading Company", url: "https://astratc.github.io" },
@@ -37,13 +39,17 @@ app.get("/demo", async c => {
 
 const outSchema = { type: "object", properties: { score: { type: "number" }, grade: { type: "string" }, checks: { type: "array" }, fixes: { type: "array" } } };
 const inSchema = { queryParams: { url: { type: "string", required: true, description: "domain or https URL to audit" } } };
-app.use("/v1/*", (c, next) => paymentMiddleware(c.env.PAY_TO, {
-  "/v1/check": { price: c.env.PRICE_CHECK, network: c.env.NETWORK, config: { description: "AgentReady quick check: agent-readiness score (x402, did.json, agent card, MCP, llms.txt, robots, OpenAPI, CORS) + fix list. Query: url=", mimeType: "application/json", inputSchema: inSchema, outputSchema: outSchema, discoverable: true } },
-  "/v1/report": { price: c.env.PRICE_REPORT, network: c.env.NETWORK, config: { description: "AgentReady full report: all checks with x402 probe details, robots per AI bot, fix list, templates and markdown report. Query: url=", mimeType: "application/json", inputSchema: inSchema, outputSchema: { ...outSchema, properties: { ...outSchema.properties, markdown: { type: "string" }, x402_probes: { type: "array" } } }, discoverable: true, maxTimeoutSeconds: 120 } },
-}, { url: c.env.FACILITATOR_URL })(c, next));
-const run = full => async c => { try { return c.json(await audit(c.req.query("url"), { full })); } catch (e) { return c.json({ error: String(e.message) }, 400); } };
-app.get("/v1/check", run(false));
-app.get("/v1/report", run(true));
+const ROUTES = {
+  "/v1/check": { price: "PRICE_CHECK", description: "AgentReady quick check: agent-readiness score (x402, did.json, agent card, MCP, llms.txt, robots, OpenAPI, CORS) + fix list. Query: url=", outputSchema: outSchema, maxTimeoutSeconds: 300 },
+  "/v1/report": { price: "PRICE_REPORT", description: "AgentReady full report: all checks with x402 probe details, robots per AI bot, fix list, templates and markdown report. Query: url=", outputSchema: { ...outSchema, properties: { ...outSchema.properties, markdown: { type: "string" }, x402_probes: { type: "array" } } }, maxTimeoutSeconds: 300 },
+};
+const paid = full => async c => {
+  const p = new URL(c.req.url).pathname; const r = ROUTES[p];
+  const req = requirements({ price: c.env[r.price], payTo: c.env.PAY_TO, network: c.env.NETWORK, resource: BASE + p, description: r.description, mimeType: "application/json", inputSchema: inSchema.queryParams, outputSchema: r.outputSchema, maxTimeoutSeconds: r.maxTimeoutSeconds, serviceName: "AgentReady" });
+  return paywall(c.req.raw, req, async () => { try { return Response.json(await audit(c.req.query("url"), { full })); } catch (e) { return Response.json({ error: String(e.message) }, { status: 400 }); } }, httpFacilitator(c.env.FACILITATOR_URL));
+};
+app.get("/v1/check", paid(false));
+app.get("/v1/report", paid(true));
 app.onError((e, c) => c.json({ error: "internal_error", detail: String(e.message).slice(0, 200) }, 500));
 export class Limiter { constructor(state) { this.s = state.storage; }
   async fetch(req) { const n = ((await this.s.get("n")) || 0) + 1; if (n === 1) await this.s.setAlarm(Date.now() + 90000000); await this.s.put("n", n); return Response.json(n); }
