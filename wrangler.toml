@@ -1,0 +1,21 @@
+name = "agentready"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+PAY_TO = "0x1A7Dc2677391D49FB3001AD5a1aa89A573c9b865"   # receive-only wallet
+NETWORK = "base"
+FACILITATOR_URL = "https://facilitator.payai.network"
+PRICE_CHECK = "$0.05"
+PRICE_REPORT = "$5.00"
+DEMO_PER_DAY = "3"
+CONTACT = "carl.astratc@proton.me"
+
+[[durable_objects.bindings]]
+name = "LIMITER"
+class_name = "Limiter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Limiter"]
